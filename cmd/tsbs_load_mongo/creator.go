@@ -1,29 +1,49 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
 
-	"github.com/globalsign/mgo"
-	"github.com/globalsign/mgo/bson"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 type dbCreator struct {
-	session *mgo.Session
+	client *mongo.Client
+	ctx    context.Context
 }
 
 func (d *dbCreator) Init() {
 	var err error
-	d.session, err = mgo.DialWithTimeout(daemonURL, writeTimeout)
+	d.ctx = context.Background()
+
+	clientOptions := options.Client().
+		ApplyURI(daemonURL).
+		SetConnectTimeout(writeTimeout).
+		SetServerSelectionTimeout(writeTimeout)
+
+	d.client, err = mongo.Connect(d.ctx, clientOptions)
 	if err != nil {
 		log.Fatal(err)
 	}
-	d.session.SetMode(mgo.Eventual, false)
+
+	// Verify connection
+	ctx, cancel := context.WithTimeout(d.ctx, writeTimeout)
+	defer cancel()
+	err = d.client.Ping(ctx, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
 }
 
 func (d *dbCreator) DBExists(dbName string) bool {
-	dbs, err := d.session.DatabaseNames()
+	ctx, cancel := context.WithTimeout(d.ctx, writeTimeout)
+	defer cancel()
+
+	dbs, err := d.client.ListDatabaseNames(ctx, bson.M{})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -36,74 +56,146 @@ func (d *dbCreator) DBExists(dbName string) bool {
 }
 
 func (d *dbCreator) RemoveOldDB(dbName string) error {
-	collections, err := d.session.DB(dbName).CollectionNames()
+	ctx, cancel := context.WithTimeout(d.ctx, writeTimeout)
+	defer cancel()
+
+	db := d.client.Database(dbName)
+	collections, err := db.ListCollectionNames(ctx, bson.M{})
 	if err != nil {
 		return err
 	}
 	for _, name := range collections {
-		d.session.DB(dbName).C(name).DropCollection()
+		err := db.Collection(name).Drop(ctx)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
 }
 
 func (d *dbCreator) CreateDB(dbName string) error {
-	cmd := make(bson.D, 0, 4)
-	cmd = append(cmd, bson.DocElem{Name: "create", Value: collectionName})
+	ctx, cancel := context.WithTimeout(d.ctx, writeTimeout)
+	defer cancel()
 
-	// wiredtiger settings
-	cmd = append(cmd, bson.DocElem{
-		Name: "storageEngine", Value: map[string]interface{}{
-			"wiredTiger": map[string]interface{}{
+	db := d.client.Database(dbName)
+
+	var err error
+
+	if useTimeSeries && false {
+		// Create MongoDB native time series collection using raw command
+		// This allows us to pass hcindex options that may not be in the Go driver yet
+		timeseriesConfig := bson.M{
+			"timeField":   timestampField,
+			"metaField":   "tags",
+			"granularity": "seconds",
+		}
+
+		if useHCIndex {
+			// Add high cardinality index options
+			timeseriesConfig["useHCIndex"] = true
+			timeseriesConfig["hcindexOptions"] = bson.M{
+				"period":    "minute",
+				"frequency": 1,
+				// For devops use case, we don't exclude any columns by default
+				// Users can modify this based on their specific needs
+			}
+			log.Printf("Creating MongoDB time series collection with high cardinality index")
+		} else {
+			log.Printf("Creating MongoDB time series collection (requires MongoDB 5.0+)")
+		}
+
+		createCmd := bson.D{
+			{Key: "create", Value: collectionName},
+			{Key: "timeseries", Value: timeseriesConfig},
+		}
+
+		// Debug: log the exact command being sent
+		if cmdBytes, marshalErr := bson.MarshalExtJSON(createCmd, false, false); marshalErr == nil {
+			log.Printf("Creating collection with command: %s", string(cmdBytes))
+		}
+
+		err = db.RunCommand(ctx, createCmd).Err()
+	} else if !useTimeSeries {
+		// Create regular collection with wiredtiger settings
+		createOpts := options.CreateCollection()
+		createOpts.SetStorageEngine(bson.M{
+			"wiredTiger": bson.M{
 				"configString": "block_compressor=snappy",
 			},
-		},
-	})
-
-	err := d.session.DB(dbName).Run(cmd, nil)
+		})
+		err = db.CreateCollection(ctx, collectionName, createOpts)
+	}
 	if err != nil {
 		if strings.Contains(err.Error(), "already exists") {
-			return nil
+			// Collection already exists, continue
+		} else {
+			return fmt.Errorf("create collection err: %v", err)
 		}
-		return fmt.Errorf("create collection err: %v", err)
 	}
 
-	collection := d.session.DB(dbName).C(collectionName)
-	var key []string
-	if documentPer {
-		key = []string{"measurement", "tags.hostname", timestampField}
-	} else {
-		key = []string{aggKeyID, "measurement", "tags.hostname"}
-	}
+	collection := db.Collection(collectionName)
 
-	index := mgo.Index{
-		Key:        key,
-		Unique:     false, // Unique does not work on the entire array of tags!
-		Background: false,
-		Sparse:     false,
-	}
-	err = collection.EnsureIndex(index)
-	if err != nil {
-		return fmt.Errorf("create basic index err: %v", err)
-	}
+	// Time series collections have automatic indexing on timeField and metaField
+	// so we only create custom indexes for regular collections
+	if !useTimeSeries {
+		// Create index
+		var keys bson.D
+		if documentPer {
+			keys = bson.D{
+				{Key: "measurement", Value: 1},
+				{Key: "tags.hostname", Value: 1},
+				{Key: timestampField, Value: 1},
+			}
+		} else {
+			keys = bson.D{
+				{Key: aggKeyID, Value: 1},
+				{Key: "measurement", Value: 1},
+				{Key: "tags.hostname", Value: 1},
+			}
+		}
 
-	// To make updates for new records more efficient, we need a efficient doc
-	// lookup index
-	if !documentPer {
-		err = collection.EnsureIndex(mgo.Index{
-			Key:        []string{aggDocID},
-			Unique:     false,
-			Background: false,
-			Sparse:     false,
-		})
+		indexModel := mongo.IndexModel{
+			Keys: keys,
+			Options: options.Index().
+				SetUnique(false).
+				SetBackground(false).
+				SetSparse(false),
+		}
+
+		ctx2, cancel2 := context.WithTimeout(d.ctx, writeTimeout)
+		defer cancel2()
+		_, err = collection.Indexes().CreateOne(ctx2, indexModel)
 		if err != nil {
-			return fmt.Errorf("create agg doc index err: %v", err)
+			return fmt.Errorf("create basic index err: %v", err)
 		}
+
+		// To make updates for new records more efficient, we need an efficient doc
+		// lookup index
+		if !documentPer {
+			aggIndexModel := mongo.IndexModel{
+				Keys: bson.D{{Key: aggDocID, Value: 1}},
+				Options: options.Index().
+					SetUnique(false).
+					SetBackground(false).
+					SetSparse(false),
+			}
+
+			ctx3, cancel3 := context.WithTimeout(d.ctx, writeTimeout)
+			defer cancel3()
+			_, err = collection.Indexes().CreateOne(ctx3, aggIndexModel)
+			if err != nil {
+				return fmt.Errorf("create agg doc index err: %v", err)
+			}
+		}
+	} else {
+		log.Printf("Skipping custom index creation for time series collection (automatic indexing enabled)")
 	}
 
 	return nil
 }
 
-func (d *dbCreator) Close() {
-	d.session.Close()
-}
+// Note: We intentionally do NOT implement the Close() method here.
+// The MongoDB client connection needs to remain open for the duration of the benchmark
+// as worker processors use the same dbCreator.client reference.
+// The connection will be cleaned up when the process exits.

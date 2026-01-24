@@ -27,9 +27,11 @@ const (
 
 // Program option vars:
 var (
-	daemonURL    string
-	documentPer  bool
-	writeTimeout time.Duration
+	daemonURL      string
+	documentPer    bool
+	useTimeSeries  bool
+	useHCIndex     bool
+	writeTimeout   time.Duration
 )
 
 // Global vars
@@ -61,6 +63,21 @@ func init() {
 	daemonURL = viper.GetString("url")
 	writeTimeout = viper.GetDuration("write-timeout")
 	documentPer = viper.GetBool("document-per-event")
+	useTimeSeries = viper.GetBool("use-timeseries")
+	useHCIndex = viper.GetBool("use-hcindex")
+
+	// Validate time series collection usage
+	if useTimeSeries && !documentPer {
+		panic(fmt.Errorf("time series collections require --document-per-event=true. " +
+			"Aggregated mode is not compatible with MongoDB time series collections"))
+	}
+
+	// Validate high cardinality index usage
+	if useHCIndex && !useTimeSeries {
+		panic(fmt.Errorf("high cardinality index requires --use-timeseries=true. " +
+			"HCIndex is only available for MongoDB time series collections"))
+	}
+
 	if documentPer {
 		config.HashWorkers = false
 	} else {

@@ -21,6 +21,8 @@ func (t *mongoTarget) TargetSpecificFlags(flagPrefix string, flagSet *pflag.Flag
 	flagSet.String(flagPrefix+"url", "localhost:27017", "Mongo URL.")
 	flagSet.Duration(flagPrefix+"write-timeout", 10*time.Second, "Write timeout.")
 	flagSet.Bool(flagPrefix+"document-per-event", false, "Whether to use one document per event or aggregate by hour")
+	flagSet.Bool(flagPrefix+"use-timeseries", false, "Whether to use MongoDB native time series collection (requires MongoDB 5.0+)")
+	flagSet.Bool(flagPrefix+"use-hcindex", false, "Whether to use MongoDB high cardinality index for time series collections (requires --use-timeseries)")
 }
 
 func (t *mongoTarget) TargetName() string {
