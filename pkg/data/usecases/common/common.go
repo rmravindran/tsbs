@@ -24,6 +24,7 @@ const (
 	UseCaseDevops        = "devops"
 	UseCaseIoT           = "iot"
 	UseCaseDevopsGeneric = "devops-generic"
+	UseCaseEcommerce     = "ecommerce"
 )
 
 var UseCaseChoices = []string{
@@ -32,4 +33,5 @@ var UseCaseChoices = []string{
 	UseCaseDevops,
 	UseCaseIoT,
 	UseCaseDevopsGeneric,
+	UseCaseEcommerce,
 }

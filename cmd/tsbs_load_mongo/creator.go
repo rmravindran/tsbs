@@ -56,6 +56,7 @@ func (d *dbCreator) DBExists(dbName string) bool {
 }
 
 func (d *dbCreator) RemoveOldDB(dbName string) error {
+
 	ctx, cancel := context.WithTimeout(d.ctx, writeTimeout)
 	defer cancel()
 
@@ -82,24 +83,30 @@ func (d *dbCreator) CreateDB(dbName string) error {
 
 	var err error
 
-	if useTimeSeries && false {
+	if useTimeSeries {
 		// Create MongoDB native time series collection using raw command
 		// This allows us to pass hcindex options that may not be in the Go driver yet
-		timeseriesConfig := bson.M{
-			"timeField":   timestampField,
-			"metaField":   "tags",
-			"granularity": "seconds",
+		timeseriesConfig := bson.D{
+			{Key: "timeField", Value: timestampField},
+			{Key: "metaField", Value: "metadata"},
+			{Key: "granularity", Value: "seconds"},
 		}
 
 		if useHCIndex {
 			// Add high cardinality index options
-			timeseriesConfig["useHCIndex"] = true
-			timeseriesConfig["hcindexOptions"] = bson.M{
-				"period":    "minute",
-				"frequency": 1,
-				// For devops use case, we don't exclude any columns by default
-				// Users can modify this based on their specific needs
+			timeseriesConfig = append(timeseriesConfig, bson.E{Key: "useHCIndex", Value: true})
+
+			hcindexOpts := bson.D{
+				{Key: "period", Value: "hour"},
+				{Key: "frequency", Value: int32(6)},
 			}
+
+			// Add excludedColumns for high cardinality fields
+			// These are fields that should not be indexed due to very high cardinality
+			excludedCols := bson.A{"order_id", "session_id", "cart_id", "primary_product_id", "user_id"}
+			hcindexOpts = append(hcindexOpts, bson.E{Key: "excludedColumns", Value: excludedCols})
+
+			timeseriesConfig = append(timeseriesConfig, bson.E{Key: "hcindexOptions", Value: hcindexOpts})
 			log.Printf("Creating MongoDB time series collection with high cardinality index")
 		} else {
 			log.Printf("Creating MongoDB time series collection (requires MongoDB 5.0+)")
@@ -116,7 +123,7 @@ func (d *dbCreator) CreateDB(dbName string) error {
 		}
 
 		err = db.RunCommand(ctx, createCmd).Err()
-	} else if !useTimeSeries {
+	} else {
 		// Create regular collection with wiredtiger settings
 		createOpts := options.CreateCollection()
 		createOpts.SetStorageEngine(bson.M{

@@ -5,6 +5,7 @@ import (
 	"github.com/timescale/tsbs/internal/utils"
 	"github.com/timescale/tsbs/pkg/data/usecases/common"
 	"github.com/timescale/tsbs/pkg/data/usecases/devops"
+	"github.com/timescale/tsbs/pkg/data/usecases/ecommerce"
 	"github.com/timescale/tsbs/pkg/data/usecases/iot"
 	"math"
 )
@@ -75,6 +76,12 @@ func GetSimulatorConfig(dgc *common.DataGeneratorConfig) (common.SimulatorConfig
 				HostConstructor: devops.NewHostGenericMetrics,
 				MaxMetricCount:  dgc.MaxMetricCountPerHost,
 			},
+		}
+	case common.UseCaseEcommerce:
+		ret = &ecommerce.OrderSimulatorConfig{
+			Start: tsStart,
+			End:   tsEnd,
+			Scale: dgc.Scale,
 		}
 	default:
 		err = fmt.Errorf("unknown use case: '%s'", dgc.Use)

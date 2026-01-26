@@ -196,7 +196,7 @@ func (d *dbCreator) createTableAndIndexes(dbBench *sql.DB, tableName string, fie
 
 	if d.opts.UseHypertable {
 		var creationCommand string = "create_hypertable"
-		var partitionsOption string = "replication_factor => NULL"
+		var partitionsOption string = ""
 
 		MustExec(dbBench, "CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE")
 
@@ -218,12 +218,23 @@ func (d *dbCreator) createTableAndIndexes(dbBench *sql.DB, tableName string, fie
 		if d.opts.ReplicationFactor > 0 {
 			// This gives us a future option of testing the impact of
 			// multi-node replication across data nodes
+			// Note: replication_factor parameter was removed in TimescaleDB 2.13+
+			// For distributed hypertables, use create_distributed_hypertable instead
 			partitionsOption = fmt.Sprintf("partitioning_column => '%s'::name, replication_factor => %v::smallint", partitionColumn, d.opts.ReplicationFactor)
 		}
 
-		MustExec(dbBench,
-			fmt.Sprintf("SELECT %s('%s'::regclass, 'time'::name, %s, chunk_time_interval => %d, create_default_indexes=>FALSE)",
-				creationCommand, tableName, partitionsOption, d.opts.ChunkTime.Nanoseconds()/1000))
+		// Build the create_hypertable command
+		// For TimescaleDB 2.13+, we don't pass replication_factor for regular hypertables
+		var hypertableCmd string
+		if partitionsOption != "" {
+			hypertableCmd = fmt.Sprintf("SELECT %s('%s'::regclass, 'time'::name, %s, chunk_time_interval => %d, create_default_indexes=>FALSE)",
+				creationCommand, tableName, partitionsOption, d.opts.ChunkTime.Nanoseconds()/1000)
+		} else {
+			hypertableCmd = fmt.Sprintf("SELECT %s('%s'::regclass, 'time'::name, chunk_time_interval => %d, create_default_indexes=>FALSE)",
+				creationCommand, tableName, d.opts.ChunkTime.Nanoseconds()/1000)
+		}
+
+		MustExec(dbBench, hypertableCmd)
 	}
 }
 
