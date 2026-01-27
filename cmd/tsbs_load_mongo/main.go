@@ -27,11 +27,11 @@ const (
 
 // Program option vars:
 var (
-	daemonURL      string
-	documentPer    bool
-	useTimeSeries  bool
-	useHCIndex     bool
-	writeTimeout   time.Duration
+	daemonURL     string
+	documentPer   bool
+	useTimeSeries bool
+	useHCIndex    bool
+	writeTimeout  time.Duration
 )
 
 // Global vars
@@ -96,4 +96,11 @@ func main() {
 	}
 
 	loader.RunBenchmark(benchmark)
+
+	// Print database timing statistics
+	if documentPer {
+		PrintDBTimingStats()
+	} else {
+		PrintAggDBTimingStats()
+	}
 }

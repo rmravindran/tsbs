@@ -6,14 +6,24 @@ import (
 	"hash/fnv"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
 	"github.com/timescale/tsbs/load"
 	"github.com/timescale/tsbs/pkg/data"
 	"github.com/timescale/tsbs/pkg/targets"
 	mongopkg "github.com/timescale/tsbs/pkg/targets/mongo"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+)
+
+var (
+	// Global counters for timing database operations in aggregate mode
+	totalAggDBInsertTime  int64 // in nanoseconds (for InsertMany)
+	totalAggDBBulkTime    int64 // in nanoseconds (for BulkWrite)
+	totalAggDBInsertCalls int64
+	totalAggDBBulkCalls   int64
+	totalAggDBRows        int64 // total rows processed
 )
 
 type hostnameIndexer struct {
@@ -103,23 +113,24 @@ func (p *aggProcessor) Init(_ int, doLoad, _ bool) {
 // is first encountered)
 //
 // A document is structured like so:
-//  {
-//    "doc_id": "day_x_00",
-//    "key_id": "x_00",
-//    "measurement": "cpu",
-//    "tags": {
-//      "hostname": "host0",
-//      ...
-//    },
-//    "events": [
-//      [
-//        {
-//          "field1": 0.0,
-//          ...
-//		  }
-//      ]
-//    ]
-//  }
+//
+//	 {
+//	   "doc_id": "day_x_00",
+//	   "key_id": "x_00",
+//	   "measurement": "cpu",
+//	   "tags": {
+//	     "hostname": "host0",
+//	     ...
+//	   },
+//	   "events": [
+//	     [
+//	       {
+//	         "field1": 0.0,
+//	         ...
+//			  }
+//	     ]
+//	   ]
+//	 }
 func (p *aggProcessor) ProcessBatch(b targets.Batch, doLoad bool) (uint64, uint64) {
 	docToEvents := make(map[string][]*point)
 	batch := b.(*batch)
@@ -211,7 +222,16 @@ func (p *aggProcessor) ProcessBatch(b targets.Batch, doLoad bool) (uint64, uint6
 
 		// All documents accounted for, finally run the operation
 		if len(updates) > 0 {
+			// Measure only the database BulkWrite time
+			dbStart := time.Now()
 			_, err := p.collection.BulkWrite(ctx, updates)
+			dbDuration := time.Since(dbStart)
+
+			// Accumulate timing statistics
+			atomic.AddInt64(&totalAggDBBulkTime, dbDuration.Nanoseconds())
+			atomic.AddInt64(&totalAggDBBulkCalls, 1)
+			atomic.AddInt64(&totalAggDBRows, int64(rowCnt))
+
 			if err != nil {
 				log.Fatalf("Bulk aggregate update err: %s\n", err.Error())
 			}
@@ -239,7 +259,15 @@ func insertNewAggregateDocs(ctx context.Context, collection *mongo.Collection, c
 				l = len(createQueue)
 			}
 
+			// Measure only the database InsertMany time
+			dbStart := time.Now()
 			_, err := collection.InsertMany(ctx, createQueue[off:l])
+			dbDuration := time.Since(dbStart)
+
+			// Accumulate timing statistics
+			atomic.AddInt64(&totalAggDBInsertTime, dbDuration.Nanoseconds())
+			atomic.AddInt64(&totalAggDBInsertCalls, 1)
+
 			if err != nil {
 				log.Fatalf("Bulk aggregate docs err: %s\n", err.Error())
 			}
@@ -247,4 +275,45 @@ func insertNewAggregateDocs(ctx context.Context, collection *mongo.Collection, c
 			off = l
 		}
 	}
+}
+
+// PrintAggDBTimingStats prints the accumulated database timing statistics for aggregate mode
+func PrintAggDBTimingStats() {
+	totalInsertCalls := atomic.LoadInt64(&totalAggDBInsertCalls)
+	totalInsertTime := atomic.LoadInt64(&totalAggDBInsertTime)
+	totalBulkCalls := atomic.LoadInt64(&totalAggDBBulkCalls)
+	totalBulkTime := atomic.LoadInt64(&totalAggDBBulkTime)
+	totalRows := atomic.LoadInt64(&totalAggDBRows)
+
+	fmt.Printf("\n=== Database Timing Statistics (Aggregate Mode) ===\n")
+
+	if totalInsertCalls > 0 {
+		avgInsertTimeMs := float64(totalInsertTime) / float64(totalInsertCalls) / 1e6
+		totalInsertTimeSec := float64(totalInsertTime) / 1e9
+		fmt.Printf("InsertMany operations:\n")
+		fmt.Printf("  Total calls: %d\n", totalInsertCalls)
+		fmt.Printf("  Total time: %.3f sec\n", totalInsertTimeSec)
+		fmt.Printf("  Average time per call: %.3f ms\n", avgInsertTimeMs)
+	}
+
+	if totalBulkCalls > 0 {
+		avgBulkTimeMs := float64(totalBulkTime) / float64(totalBulkCalls) / 1e6
+		totalBulkTimeSec := float64(totalBulkTime) / 1e9
+		fmt.Printf("BulkWrite operations:\n")
+		fmt.Printf("  Total calls: %d\n", totalBulkCalls)
+		fmt.Printf("  Total time: %.3f sec\n", totalBulkTimeSec)
+		fmt.Printf("  Average time per call: %.3f ms\n", avgBulkTimeMs)
+	}
+
+	if totalInsertCalls > 0 || totalBulkCalls > 0 {
+		totalDBTime := float64(totalInsertTime+totalBulkTime) / 1e9
+		fmt.Printf("Total rows processed: %d\n", totalRows)
+		fmt.Printf("Total DB operation time: %.3f sec\n", totalDBTime)
+		if totalDBTime > 0 {
+			meanRowsPerSec := float64(totalRows) / totalDBTime
+			fmt.Printf("Mean insert rate: %.2f rows/sec\n", meanRowsPerSec)
+		}
+	}
+
+	fmt.Printf("====================================================\n\n")
 }

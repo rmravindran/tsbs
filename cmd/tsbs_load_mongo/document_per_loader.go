@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/timescale/tsbs/load"
@@ -11,6 +13,13 @@ import (
 	mongopkg "github.com/timescale/tsbs/pkg/targets/mongo"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
+)
+
+var (
+	// Global counters for timing database operations
+	totalDBInsertTime int64 // in nanoseconds
+	totalDBCalls      int64
+	totalDBRows       int64 // total rows inserted
 )
 
 // naiveBenchmark allows you to run a benchmark using the naive, one document per
@@ -124,7 +133,16 @@ func (p *naiveProcessor) ProcessBatch(b targets.Batch, doLoad bool) (uint64, uin
 		ctx, cancel := context.WithTimeout(p.dbc.ctx, writeTimeout)
 		defer cancel()
 
+		// Measure only the database insertion time
+		dbStart := time.Now()
 		_, err := p.collection.InsertMany(ctx, p.pvs)
+		dbDuration := time.Since(dbStart)
+
+		// Accumulate timing statistics
+		atomic.AddInt64(&totalDBInsertTime, dbDuration.Nanoseconds())
+		atomic.AddInt64(&totalDBCalls, 1)
+		atomic.AddInt64(&totalDBRows, int64(len(batch)))
+
 		if err != nil {
 			log.Fatalf("Bulk insert docs err: %s\n", err.Error())
 		}
@@ -139,4 +157,25 @@ func (p *naiveProcessor) ProcessBatch(b targets.Batch, doLoad bool) (uint64, uin
 
 	// Return metricCnt (total field values) and rowCnt (number of documents/events inserted)
 	return metricCnt, uint64(len(batch))
+}
+
+// PrintDBTimingStats prints the accumulated database timing statistics
+func PrintDBTimingStats() {
+	totalCalls := atomic.LoadInt64(&totalDBCalls)
+	totalTime := atomic.LoadInt64(&totalDBInsertTime)
+	totalRows := atomic.LoadInt64(&totalDBRows)
+
+	if totalCalls > 0 {
+		avgTimeMs := float64(totalTime) / float64(totalCalls) / 1e6
+		totalTimeSec := float64(totalTime) / 1e9
+		meanRowsPerSec := float64(totalRows) / totalTimeSec
+
+		fmt.Printf("\n=== Database Insert Timing Statistics ===\n")
+		fmt.Printf("Total DB InsertMany calls: %d\n", totalCalls)
+		fmt.Printf("Total rows inserted: %d\n", totalRows)
+		fmt.Printf("Total time in DB operations: %.3f sec\n", totalTimeSec)
+		fmt.Printf("Average time per InsertMany call: %.3f ms\n", avgTimeMs)
+		fmt.Printf("Mean insert rate: %.2f rows/sec\n", meanRowsPerSec)
+		fmt.Printf("=========================================\n\n")
+	}
 }

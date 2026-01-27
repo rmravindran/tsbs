@@ -92,13 +92,14 @@ func (d *dbCreator) CreateDB(dbName string) error {
 			{Key: "granularity", Value: "seconds"},
 		}
 
+		// High cardinality index is an experimental feature.
 		if useHCIndex {
 			// Add high cardinality index options
 			timeseriesConfig = append(timeseriesConfig, bson.E{Key: "useHCIndex", Value: true})
 
 			hcindexOpts := bson.D{
 				{Key: "period", Value: "hour"},
-				{Key: "frequency", Value: int32(6)},
+				{Key: "frequency", Value: int32(1)},
 			}
 
 			// Add excludedColumns for high cardinality fields
