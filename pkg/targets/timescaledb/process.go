@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/timescale/tsbs/pkg/targets"
@@ -24,6 +25,13 @@ const (
 	insertTagsSQL = `INSERT INTO tags(%s) VALUES %s ON CONFLICT DO NOTHING RETURNING *`
 	getTagsSQL    = `SELECT * FROM tags`
 	numExtraCols  = 2 // one for json, one for tags_id
+)
+
+var (
+	// Global counters for timing database operations
+	totalDBInsertTime int64 // in nanoseconds
+	totalDBCalls      int64
+	totalDBRows       int64 // total rows inserted
 )
 
 type syncCSI struct {
@@ -82,6 +90,9 @@ func (p *processor) insertTags(db *sql.DB, tagRows [][]string) map[string]int64 
 			values = append(values, row)
 		}
 	}
+	// Measure tag insertion database operation time
+	dbStart := time.Now()
+
 	tx := MustBegin(db)
 	defer tx.Commit()
 	res, err := tx.Query(fmt.Sprintf(insertTagsSQL, strings.Join(cols, ","), strings.Join(values, ",")))
@@ -90,6 +101,14 @@ func (p *processor) insertTags(db *sql.DB, tagRows [][]string) map[string]int64 
 	}
 
 	ret := p.sqlTagsToCacheLine(res, err, tagCols)
+
+	dbDuration := time.Since(dbStart)
+
+	// Accumulate timing statistics for tag insertions
+	atomic.AddInt64(&totalDBInsertTime, dbDuration.Nanoseconds())
+	atomic.AddInt64(&totalDBCalls, 1)
+	// Note: tagRows are not counted in totalDBRows as they're metadata, not data rows
+
 	return ret
 }
 
@@ -223,6 +242,9 @@ func (p *processor) processCSI(hypertable string, rows []*insertData) uint64 {
 	cols = append(cols, tableCols[hypertable]...)
 
 	if p.opts.ForceTextFormat {
+		// Measure only the database operation time
+		dbStart := time.Now()
+
 		tx := MustBegin(p._db)
 		stmt, err := tx.Prepare(pq.CopyIn(hypertable, cols...))
 		if err != nil {
@@ -246,10 +268,27 @@ func (p *processor) processCSI(hypertable string, rows []*insertData) uint64 {
 		if err != nil {
 			panic(err)
 		}
+
+		dbDuration := time.Since(dbStart)
+
+		// Accumulate timing statistics
+		atomic.AddInt64(&totalDBInsertTime, dbDuration.Nanoseconds())
+		atomic.AddInt64(&totalDBCalls, 1)
+		atomic.AddInt64(&totalDBRows, int64(len(dataRows)))
 	} else {
 		if !p.opts.UseInsert {
+			// Measure only the database CopyFrom operation time
+			dbStart := time.Now()
+
 			rows := pgx.CopyFromRows(dataRows)
 			inserted, err := p._pgxConn.CopyFrom(context.Background(), pgx.Identifier{hypertable}, cols, rows)
+
+			dbDuration := time.Since(dbStart)
+
+			// Accumulate timing statistics
+			atomic.AddInt64(&totalDBInsertTime, dbDuration.Nanoseconds())
+			atomic.AddInt64(&totalDBCalls, 1)
+			atomic.AddInt64(&totalDBRows, int64(len(dataRows)))
 
 			if err != nil {
 				panic(err)
@@ -260,6 +299,9 @@ func (p *processor) processCSI(hypertable string, rows []*insertData) uint64 {
 				os.Exit(1)
 			}
 		} else {
+			// Measure only the database batch INSERT operation time
+			dbStart := time.Now()
+
 			tx := MustBegin(p._db)
 			var stmt *sql.Stmt
 			var err error
@@ -281,6 +323,13 @@ func (p *processor) processCSI(hypertable string, rows []*insertData) uint64 {
 			if err != nil {
 				panic(err)
 			}
+
+			dbDuration := time.Since(dbStart)
+
+			// Accumulate timing statistics
+			atomic.AddInt64(&totalDBInsertTime, dbDuration.Nanoseconds())
+			atomic.AddInt64(&totalDBCalls, 1)
+			atomic.AddInt64(&totalDBRows, int64(len(dataRows)))
 		}
 	}
 
@@ -427,4 +476,26 @@ func convertValsToBasedOnType(values []string, types []string, quotemark string,
 	}
 
 	return sqlVals
+}
+
+// PrintDBTimingStats prints the accumulated database timing statistics
+func PrintDBTimingStats() {
+	totalCalls := atomic.LoadInt64(&totalDBCalls)
+	totalTime := atomic.LoadInt64(&totalDBInsertTime)
+	totalRows := atomic.LoadInt64(&totalDBRows)
+
+	if totalCalls > 0 {
+		avgTimeMs := float64(totalTime) / float64(totalCalls) / 1e6
+		totalTimeSec := float64(totalTime) / 1e9
+		fmt.Printf("\n=== Database Insert Timing Statistics ===\n")
+		fmt.Printf("Total DB operation calls: %d\n", totalCalls)
+		fmt.Printf("Total rows inserted: %d\n", totalRows)
+		fmt.Printf("Total time in DB operations: %.3f sec\n", totalTimeSec)
+		fmt.Printf("Average time per DB call: %.3f ms\n", avgTimeMs)
+		if totalTimeSec > 0 {
+			meanRowsPerSec := float64(totalRows) / totalTimeSec
+			fmt.Printf("Mean insert rate: %.2f rows/sec\n", meanRowsPerSec)
+		}
+		fmt.Printf("=========================================\n\n")
+	}
 }

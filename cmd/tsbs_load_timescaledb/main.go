@@ -101,6 +101,9 @@ func main() {
 	}
 	loader.RunBenchmark(benchmark)
 
+	// Print database timing statistics
+	timescaledb.PrintDBTimingStats()
+
 	if len(opts.ReplicationStatsFile) > 0 {
 		replicationStatsWaitGroup.Wait()
 	}
